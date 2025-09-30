@@ -1,4 +1,5 @@
-// src/index.ts - 调试版本
+// src/index.ts - 完整版（包括文件处理）
+
 export interface Env {
   BOT_TOKEN: string;
   SECRET_TOKEN: string;
@@ -8,10 +9,8 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const method = request.method;
-    
-    console.log(`[${new Date().toISOString()}] ${method} ${url.pathname}`);
-    
-    // CORS 头
+
+    // CORS Headers
     const corsHeaders = {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -24,7 +23,6 @@ export default {
     }
 
     try {
-      // 路由处理
       if (method === 'POST' && url.pathname === '/webhook') {
         return await handleWebhook(request, env, ctx);
       } else if (method === 'GET' && url.pathname.startsWith('/file/')) {
@@ -35,8 +33,6 @@ export default {
         return await deleteWebhook(request, env);
       } else if (method === 'GET' && url.pathname === '/info') {
         return await getBotInfo(request, env);
-      } else if (method === 'GET' && url.pathname === '/debug') {
-        return await debugInfo(request, env);
       } else {
         return new Response(JSON.stringify({
           status: 'success',
@@ -73,7 +69,7 @@ export default {
 async function debugInfo(request: Request, env: Env): Promise<Response> {
   const hasBotToken = !!env.BOT_TOKEN;
   const hasSecretToken = !!env.SECRET_TOKEN;
-  const botTokenPreview = env.BOT_TOKEN ? `${env.BOT_TOKEN.substring(0, 10)}...` : 'MISSING';
+  const botTokenPreview = env.BOT_TOKEN ? `${env.BOT_TOKEN.substring(0, 8)}******` : 'MISSING';
   
   return new Response(JSON.stringify({
     status: 'debug',
@@ -108,7 +104,7 @@ async function handleWebhook(request: Request, env: Env, ctx: ExecutionContext):
     const update = await request.json();
     console.log('Webhook update received:', JSON.stringify(update, null, 2));
     
-    // 立即返回 200 响应，然后在后台处理
+    // 后台处理更新
     ctx.waitUntil(processUpdate(update, env));
     
     return new Response('OK');
@@ -118,7 +114,7 @@ async function handleWebhook(request: Request, env: Env, ctx: ExecutionContext):
   }
 }
 
-// 处理更新
+// 处理更新逻辑
 async function processUpdate(update: any, env: Env): Promise<void> {
   try {
     console.log('Processing update:', update.update_id);
@@ -143,30 +139,23 @@ async function handleMessage(message: any, env: Env): Promise<void> {
   
   console.log(`Message from ${username} (${chatId}): ${text}`);
   
-  // 处理命令
   if (text && text.startsWith('/')) {
-    console.log(`Command received: ${text}`);
     await handleCommand(message, env);
     return;
   }
   
-  // 处理文件
+  // 区分文件和非文件类型
   if (message.document) {
-    console.log('Document received');
     await handleDocument(message, env);
   } else if (message.photo && message.photo.length > 0) {
-    console.log('Photo received');
     await handlePhoto(message, env);
   } else if (message.video) {
-    console.log('Video received');
     await handleVideo(message, env);
   } else if (message.audio) {
-    console.log('Audio received');
     await handleAudio(message, env);
-  } else if (text) {
-    console.log('Text message received');
+  } else {
     await sendMessage(chatId, 
-      `🤖 欢迎使用文件代理机器人！\n\n发送文件、图片、视频或音频给我，我会返回可以直接下载的代理链接。\n\n使用 /help 查看帮助。`,
+      `🤖 欢迎使用文件代理机器人！\n\n发送文件给我，我会生成可以直接下载的代理链接。\n\n使用 /help 查看帮助。`,
       env
     );
   }
@@ -182,27 +171,14 @@ async function handleCommand(message: any, env: Env): Promise<void> {
   switch (command) {
     case '/start':
       await sendMessage(chatId,
-        `👋 欢迎使用文件代理机器人！\n\n` +
-        `直接发送文件给我，我会生成可以直接下载的代理链接。\n\n` +
-        `支持的文件类型：\n` +
-        `• 📎 文档文件\n` +
-        `• 🖼️ 图片文件\n` +
-        `• 🎥 视频文件\n` +
-        `• 🎵 音频文件\n\n` +
-        `使用 /help 查看详细帮助。`,
+        `👋 欢迎使用文件代理机器人！\n\n直接发送文件给我，我会生成可以直接下载的代理链接。\n\n使用 /help 查看详细帮助。`,
         env
       );
       break;
       
     case '/help':
       await sendMessage(chatId,
-        `📖 使用帮助：\n\n` +
-        `• 直接发送任意文件\n` +
-        `• 支持文档、图片、视频、音频\n` +
-        `• 自动生成代理下载链接\n` +
-        `• 链接24小时内有效\n` +
-        `• 通过 Cloudflare CDN 加速\n\n` +
-        `试试发送一个文件给我吧！`,
+        `📖 使用帮助：\n\n• 发送文件\n• 支持文档、图片、视频、音频\n• 自动生成代理下载链接\n• 链接24小时内有效\n• 通过 Cloudflare CDN 加速\n\n试试发送一个文件给我吧！`,
         env
       );
       break;
@@ -223,8 +199,160 @@ async function handleCommand(message: any, env: Env): Promise<void> {
   }
 }
 
-// 其他处理函数保持不变（handleDocument, handlePhoto, handleVideo, handleAudio, handleFileProxy等）
-// ... [保持之前的文件处理函数不变]
+// 文件处理函数
+async function handleDocument(message: any, env: Env): Promise<void> {
+  const chatId = message.chat.id;
+  const fileId = message.document.file_id;
+
+  try {
+    const fileInfo = await getFileInfo(fileId, env);
+    const downloadLink = `https://<your-worker-name>.workers.dev/file/${fileInfo.file_path}`;
+    console.log(`Generated download link: ${downloadLink}`);
+    
+    await sendMessage(chatId,
+      `📄 收到文档文件。\n\n` +
+      `>${message.document.file_name}\n\n` +
+      `👉 下载地址: [点击下载](${downloadLink})`,
+      env,
+      'HTML'
+    );
+  } catch (error) {
+    console.error('Error handling document:', error);
+    await sendMessage(chatId, `❌ 失败获取文档文件信息。${error.message}`, env);
+  }
+}
+
+async function handlePhoto(message: any, env: Env): Promise<void> {
+  const chatId = message.chat.id;
+  const fileId = message.photo[message.photo.length - 1].file_id;
+
+  try {
+    const fileInfo = await getFileInfo(fileId, env);
+    const downloadLink = `https://<your-worker-name>.workers.dev/file/${fileInfo.file_path}`;
+    console.log(`Generated download link: ${downloadLink}`);
+    
+    await sendMessage(chatId,
+      `🖼️ 收到图片文件。\n\n` +
+      `>${message.photo[message.photo.length - 1].file_name}\n\n` +
+      `👉 下载地址: [点击下载](${downloadLink})`,
+      env,
+      'HTML'
+    );
+  } catch (error) {
+    console.error('Error handling photo:', error);
+    await sendMessage(chatId, `❌ 失败获取图片文件信息。${error.message}`, env);
+  }
+}
+
+async function handleVideo(message: any, env: Env): Promise<void> {
+  const chatId = message.chat.id;
+  const fileId = message.video.file_id;
+
+  try {
+    const fileInfo = await getFileInfo(fileId, env);
+    const downloadLink = `https://<your-worker-name>.workers.dev/file/${fileInfo.file_path}`;
+    console.log(`Generated download link: ${downloadLink}`);
+    
+    await sendMessage(chatId,
+      `🎥 收到视频文件。\n\n` +
+      `>${message.video.file_name}\n\n` +
+      `👉 下载地址: [点击下载](${downloadLink})`,
+      env,
+      'HTML'
+    );
+  } catch (error) {
+    console.error('Error handling video:', error);
+    await sendMessage(chatId, `❌ 失败获取视频文件信息。${error.message}`, env);
+  }
+}
+
+async function handleAudio(message: any, env: Env): Promise<void> {
+  const chatId = message.chat.id;
+  const fileId = message.audio.file_id;
+
+  try {
+    const fileInfo = await getFileInfo(fileId, env);
+    const downloadLink = `https://<your-worker-name>.workers.dev/file/${fileInfo.file_path}`;
+    console.log(`Generated download link: ${downloadLink}`);
+    
+    await sendMessage(chatId,
+      `🎵 收到音频文件。\n\n` +
+      `>${message.audio.file_name}\n\n` +
+      `👉 下载地址: [点击下载](${downloadLink})`,
+      env,
+      'HTML'
+    );
+  } catch (error) {
+    console.error('Error handling audio:', error);
+    await sendMessage(chatId, `❌ 失败获取音频文件信息。${error.message}`, env);
+  }
+}
+
+// 文件代理端点
+async function handleFileProxy(request: Request, url: URL, env: Env): Promise<Response> {
+  const filePath = url.pathname.slice(6); // 去掉 `/file/` 前缀，得到文件路径
+  console.log(`Handling file proxy request for: ${filePath}`);
+  
+  try {
+    const fileRes = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/getFile?file_id=${filePath}`);
+    
+    if (!fileRes.ok) {
+      console.error('Telegram file API error:', fileRes.status);
+      return new Response(JSON.stringify({
+        status: 'error',
+        message: 'Telegram 文件信息获取失败'
+      }), {
+        status: 400,
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Content-Type': 'application/json'
+        }
+      });
+    }
+
+    const fileInfo = await fileRes.json();
+    
+    if (!fileInfo.ok) {
+      console.error('Telegram file API error:', fileInfo.description);
+      return new Response(JSON.stringify({
+        status: 'error',
+        message: 'Telegram 文件信息获取失败'
+      }), {
+        status: 400,
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Content-Type': 'application/json'
+        }
+      });
+    }
+
+    const downloadLink = `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${fileInfo.file_path}`;
+    console.log(`Generated file download link: ${downloadLink}`);
+    
+    return new Response(JSON.stringify({
+      status: 'success',
+      file_path: fileInfo.file_path,
+      download_link: downloadLink
+    }), {
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Content-Type': 'application/json'
+      }
+    });
+  } catch (error) {
+    console.error('Error handling file proxy request:', error);
+    return new Response(JSON.stringify({
+      status: 'error',
+      message: '文件代理处理出错'
+    }), {
+      status: 500,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Content-Type': 'application/json'
+      }
+    });
+  }
+}
 
 // Telegram API 辅助函数
 async function getFileInfo(fileId: string, env: Env): Promise<any> {
