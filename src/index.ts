@@ -456,8 +456,13 @@ export default {
 		}
 
 		const addCors = (response: Response) => {
-			Object.entries(corsHeaders).forEach(([key, value]) => response.headers.set(key, value));
-			return response;
+			// Create a new response from the old one to get mutable headers.
+			// This is the standard way to deal with immutable headers from Response.redirect().
+			const newResponse = new Response(response.body, response);
+			Object.entries(corsHeaders).forEach(([key, value]) => {
+				newResponse.headers.set(key, value);
+			});
+			return newResponse;
 		};
 
 		let response: Response;
