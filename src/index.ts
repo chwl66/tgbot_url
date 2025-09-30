@@ -253,13 +253,13 @@ async function handleWebhook(request: Request, env: Env, params: Record<string, 
 	}
 
 	try {
-		const body = await request.json<Update>();
-		if (!body || !body.message) {
-			console.warn('🟠 Webhook update does not contain a message.');
-			return new Response(JSON.stringify({ status: 'ok', message: 'Update received, but no message to process.' }));
-		}
+		const body: any = await request.json();
+		const message: Message | undefined = body.message || body.edited_message || body.channel_post || body.edited_channel_post;
 
-		const message = body.message;
+		if (!message) {
+			console.warn('🟠 Webhook update does not contain a processable message or post. Body:', JSON.stringify(body));
+			return new Response(JSON.stringify({ status: 'ok', message: 'Update received, but no message/post to process.' }));
+		}
 		console.log('📢 Received message:', message.text || '(No text content)');
 
 		const { document, photo, video, audio, voice } = message;
