@@ -1,402 +1,477 @@
 export interface Env {
-  BOT_TOKEN: string;
-  SECRET_TOKEN: string;
-  WORKER_URL?: string;
+	BOT_TOKEN: string;
+	SECRET_TOKEN: string;
+	WORKER_URL?: string;
 }
 
-// 构造 Telegram Webhook URL
-function getWebhookUrl(env: Env): { webhookUrl: string; secretUrl: string } {
-  const webhookUrl = `https://api.telegram.org/bot${env.BOT_TOKEN}/setWebhook`;
-  const secretUrl = `https://api.telegram.org/bot${env.BOT_TOKEN}/getWebhookInfo`;
-  return { webhookUrl, secretUrl };
+// --- Telegram API Types ---
+
+interface User {
+	id: number;
+	is_bot: boolean;
+	first_name: string;
+	last_name?: string;
+	username?: string;
 }
 
-// 获取 Telegram 文件信息
-async function getFileInfo(fileId: string, env: Env): Promise<any> {
-  console.log(`Getting file info for: ${fileId}`);
-  const res = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/getFile?file_id=${fileId}`, {
-    headers: {
-      'Authorization': `Bearer ${env.SECRET_TOKEN}`
-    }
-  });
-  if (!res.ok) {
-    throw new Error(`Telegram API error: ${res.status}`);
-  }
-  const data = await res.json();
-  if (!data.ok) {
-    throw new Error(`Telegram API error: ${data.description}`);
-  }
-  return data.result;
+interface Chat {
+	id: number;
+	type: 'private' | 'group' | 'supergroup' | 'channel';
+	title?: string;
+	username?: string;
 }
 
-// 安全检查 Webhook 请求
+interface PhotoSize {
+	file_id: string;
+	file_unique_id: string;
+	width: number;
+	height: number;
+	file_size?: number;
+}
+
+interface Document {
+	file_id: string;
+	file_unique_id: string;
+	file_name?: string;
+	mime_type?: string;
+	file_size?: number;
+}
+
+interface Video {
+	file_id: string;
+	file_unique_id: string;
+	width: number;
+	height: number;
+	duration: number;
+	file_name?: string;
+	mime_type?: string;
+	file_size?: number;
+}
+
+interface Audio {
+	file_id: string;
+	file_unique_id: string;
+	duration: number;
+	file_name?: string;
+	mime_type?: string;
+	file_size?: number;
+}
+
+interface Voice {
+	file_id: string;
+	file_unique_id: string;
+	duration: number;
+	mime_type?: string;
+	file_size?: number;
+}
+
+interface Message {
+	message_id: number;
+	from?: User;
+	chat: Chat;
+	date: number;
+	text?: string;
+	photo?: PhotoSize[];
+	document?: Document;
+	video?: Video;
+	audio?: Audio;
+	voice?: Voice;
+}
+
+interface Update {
+	update_id: number;
+	message?: Message;
+}
+
+interface File {
+	file_id: string;
+	file_unique_id: string;
+	file_size?: number;
+	file_path?: string;
+}
+
+interface WebhookInfo {
+	url: string;
+	has_custom_certificate: boolean;
+	pending_update_count: number;
+	ip_address?: string;
+	last_error_date?: number;
+	last_error_message?: string;
+	last_synchronization_error_date?: number;
+	max_connections?: number;
+	allowed_updates?: string[];
+}
+
+// --- Core Functions ---
+
+/**
+ * A generic helper for making requests to the Telegram Bot API.
+ * @param method The API method to call (e.g., 'getMe', 'sendMessage').
+ * @param token The bot token.
+ * @param payload An optional payload for POST requests.
+ * @returns The 'result' field from the Telegram API response.
+ * @throws Throws an error if the API request fails or the response is not 'ok'.
+ */
+async function telegramApi<T>(method: string, token: string, payload?: object): Promise<T> {
+	const url = `https://api.telegram.org/bot${token}/${method}`;
+	const options: RequestInit = {
+		method: payload ? 'POST' : 'GET',
+		headers: { 'Content-Type': 'application/json' },
+		body: payload ? JSON.stringify(payload) : undefined,
+	};
+
+	const res = await fetch(url, options);
+	if (!res.ok) {
+		const errorData = await res.json().catch(() => ({ description: 'Failed to parse error response' }));
+		throw new Error(`Telegram API error (${res.status}): ${errorData.description}`);
+	}
+
+	const data = await res.json();
+	if (!data.ok) {
+		throw new Error(`Telegram API error: ${data.description}`);
+	}
+	return data.result;
+}
+
+/**
+ * Get file information from Telegram.
+ * @param fileId The file_id of the file to get info for.
+ * @param env The environment variables.
+ * @returns A promise that resolves to the file information.
+ */
+async function getFileInfo(fileId: string, env: Env): Promise<File> {
+	console.log(`Getting file info for ID: ${fileId}`);
+	const result = await telegramApi<File>('getFile', env.BOT_TOKEN, { file_id: fileId });
+	console.log('File info response:', result);
+	return result;
+}
+
+/**
+ * Securely check if the webhook request is authorized by validating the secret token.
+ * @param request The incoming request.
+ * @param env The environment variables.
+ * @returns A promise that resolves to true if the request is authorized, false otherwise.
+ */
 async function checkWebhookAuth(request: Request, env: Env): Promise<boolean> {
-  const url = new URL(request.url);
-  const secretToken = env.SECRET_TOKEN || '';
-  const token =
-    url.searchParams.get("token") ||
-    request.headers.get("X-Telegram-Bot-API-Secret-Token");
-  if (token === secretToken) {
-    console.log('✅ Webhook request authenticated');
-    return true;
-  }
-  console.error('🔒 Webhook request unauthorized, missing or wrong token');
-  return false;
+	const secretToken = env.SECRET_TOKEN || '';
+	if (!secretToken) {
+		// This is a critical security misconfiguration.
+		console.error('CRITICAL: SECRET_TOKEN is not set. Webhook authentication is disabled and all requests will be rejected.');
+		return false;
+	}
+
+	const token = request.headers.get('X-Telegram-Bot-API-Secret-Token');
+	if (token === secretToken) {
+		console.log('✅ Webhook request authenticated');
+		return true;
+	}
+
+	console.error('🔒 Webhook request unauthorized, missing or wrong token');
+	return false;
 }
 
-// 使消息可点击的链接
-function makeClickableLink(text: string, url: string): string {
-  return `[${text}](${url})`;
+// --- Request Handlers ---
+
+/**
+ * Handles requests to proxy a file from Telegram.
+ * It expects a URL like /file/<FILE_ID>.
+ * By default, it redirects the client directly to the temporary Telegram download URL.
+ * This is efficient and allows direct use in browser contexts (e.g., <img src="...">).
+ * If the query parameter `json=true` is provided, it returns file metadata as JSON.
+ * @param request The incoming request.
+ * @param env The environment variables.
+ * @param params The route parameters, containing the file_id.
+ * @returns A 302 Redirect Response or a JSON response with file info.
+ */
+async function handleFileProxy(request: Request, env: Env, params: { file_id: string }): Promise<Response> {
+	const { file_id } = params;
+	if (!file_id) {
+		// This case should not be reached if the router is working correctly
+		return new Response(JSON.stringify({ status: 'error', message: 'File ID is missing.' }), {
+			status: 400,
+			headers: { 'Content-Type': 'application/json' },
+		});
+	}
+	const url = new URL(request.url);
+	const returnJson = url.searchParams.get('json') === 'true';
+	console.log(`✨ Proxying file with ID: ${file_id}. Return JSON: ${returnJson}`);
+
+	try {
+		const file_info = await getFileInfo(file_id, env);
+		if (!file_info.file_path) {
+			throw new Error('file_path not available in file info.');
+		}
+		const file_url = `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${file_info.file_path}`;
+
+		if (returnJson) {
+			console.log(`Returning JSON info for file: ${file_id}`);
+			return new Response(
+				JSON.stringify(
+					{
+						status: 'success',
+						file_info: {
+							...file_info,
+							download_url: file_url,
+						},
+					},
+					null,
+					2
+				),
+				{
+					headers: { 'Content-Type': 'application/json' },
+				}
+			);
+		} else {
+			console.log(`Redirecting to: ${file_url}`);
+			return Response.redirect(file_url, 302);
+		}
+	} catch (error: any) {
+		console.error(`🚫 Failed to proxy file: ${error.message}`);
+		return new Response(JSON.stringify({ status: 'error', message: error.message }), {
+			status: 500,
+			headers: { 'Content-Type': 'application/json' },
+		});
+	}
 }
 
-// 获取 Telegram 消息内容
-async function getMessageContent(request: Request, env: Env): Promise<any> {
-  const url = new URL(request.url);
-  const chatId = url.searchParams.get("chat_id"); // 避免暴露信息
-  if (!chatId) {
-    throw new Error("Missing chat_id parameter");
-  }
-  const res = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/getMessages?chat_id=${chatId}`, {
-    headers: {
-      'Authorization': `Bearer ${env.SECRET_TOKEN}`
-    }
-  });
-  if (!res.ok) {
-    throw new Error(`Telegram API request to get message content failed: ${res.status}`);
-  }
-  return await res.json();
-}
-
-// 处理文件代理请求
-async function handleFileProxy(request: Request, url: URL, env: Env): Promise<Response> {
-  const fileId = url.pathname.slice(6); // 去掉 `/file/`
-  if (!fileId) {
-    return new Response(JSON.stringify({
-      status: "error",
-      message: "文件ID不能为空"
-    }), {
-      status: 400,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': 'application/json'
-      }
-    });
-  }
-  console.log(`✨ 正在通过文件ID获取文件信息: ${fileId}`);
-  try {
-    const file_info = await getFileInfo(fileId, env);
-    const file_url = `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${file_info.file_path}`;
-    return new Response(JSON.stringify({
-      status: "success",
-      fileInfo: {
-        file_id: file_info.file_id,
-        file_unique_id: file_info.file_unique_id,
-        file_name: file_info.file_name,
-        file_size: file_info.file_size,
-        file_path: file_info.file_path,
-        file_url: file_url
-      }
-    }), {
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': 'application/json'
-      }
-    });
-  } catch (error: any) {
-    return new Response(JSON.stringify({
-      status: "error",
-      message: error.message || "未知错误"
-    }), {
-      status: 500,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': 'application/json'
-      }
-    });
-  }
-}
-
-// 处理 Telegram Webhook POST 请求
+/**
+ * Handles incoming POST requests from the Telegram webhook.
+ * It processes messages containing files, photos, videos, etc., and replies with a public link.
+ * @param request The incoming request from Telegram.
+ * @param env The environment variables.
+ * @returns A Response to acknowledge receipt to Telegram.
+ */
 async function handleWebhook(request: Request, env: Env): Promise<Response> {
-  console.log("📦 Webhook请求已收到");
-  // 认证检查修正
-  const result = await checkWebhookAuth(request, env);
-  if (!result) {
-    return new Response(JSON.stringify({ status: "error", message: "未认证的 Webhook 请求" }), {
-      status: 403,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': 'application/json'
-      }
-    });
-  }
-  const body = await request.json();
-  if (!body || !body.update_id) {
-    console.error("🚨 请求数据不完整，未包含 update_id");
-    return new Response(JSON.stringify({
-      status: "error",
-      message: "请求数据不完整，未包含 update_id"
-    }), {
-      status: 400,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': 'application/json'
-      }
-    });
-  }
+	console.log('📦 Webhook request received');
 
-  if (body.message) {
-    console.log("📢 收到消息:", body.message.text || "无内容");
-    const { document, photo } = body.message;
-    if (document || photo) {
-      console.log("🖼️ 收到文档或图片");
-      let file_info;
-      if (document) {
-        file_info = await getFileInfo(document.file_id, env);
-      } else if (photo && photo.length > 0) {
-        // 取最大分辨率
-        file_info = await getFileInfo(photo[photo.length - 1].file_id, env);
-      }
-      const file_url = `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${file_info.file_path}`;
-      try {
-        await sendMessage(body.message.chat.id, `已收到文件: ${file_info.file_name || ''}`, env);
-      } catch (err: any) {
-        console.error("🚫 消息发送失败", err.message || err);
-      }
-      return new Response(JSON.stringify({
-        status: "success",
-        file_url: file_url,
-        file_name: file_info.file_name,
-        file_size: file_info.file_size
-      }), {
-        headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Content-Type': 'application/json'
-        }
-      });
-    } else {
-      return new Response(JSON.stringify({
-        status: "error",
-        message: "消息内容不是文档或图片"
-      }), {
-        status: 400,
-        headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Content-Type': 'application/json'
-        }
-      });
-    }
-  } else {
-    return new Response(JSON.stringify({
-      status: "error",
-      message: "消息内容未找到"
-    }), {
-      status: 404,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': 'application/json'
-      }
-    });
-  }
+	if (!(await checkWebhookAuth(request, env))) {
+		return new Response(JSON.stringify({ status: 'error', message: 'Unauthorized webhook request' }), {
+			status: 403,
+			headers: { 'Content-Type': 'application/json' },
+		});
+	}
+
+	try {
+		const body = await request.json<Update>();
+		if (!body || !body.message) {
+			console.warn('🟠 Webhook update does not contain a message.');
+			return new Response(JSON.stringify({ status: 'ok', message: 'Update received, but no message to process.' }));
+		}
+
+		const message = body.message;
+		console.log('📢 Received message:', message.text || '(No text content)');
+
+		const { document, photo, video, audio, voice } = message;
+		const media: Document | Video | Audio | Voice | PhotoSize | undefined =
+			document || video || audio || voice || (photo && photo.sort((a, b) => (b.file_size || 0) - (a.file_size || 0))[0]);
+
+		if (media && media.file_id) {
+			console.log('🖼️ Received a file.');
+			const file_id = media.file_id;
+			const file_name = 'file_name' in media && media.file_name ? media.file_name : 'telegram_file';
+
+			const worker_host = env.WORKER_URL || new URL(request.url).host;
+			const public_file_url = `https://${worker_host}/file/${file_id}`;
+
+			console.log(`📍 Public file URL: ${public_file_url}`);
+			await sendMessage(message.chat.id, `已收到文件: ${file_name}\n下载链接: ${public_file_url}`, env);
+		} else {
+			console.log('🗣️ Received a text message, providing help.');
+			const helpText = `你好！请直接向我发送文件、图片、视频或音频，我将为你生成一个公开的下载链接。
+
+你也可以通过浏览器访问以下管理端点：
+- \`/setWebhook\`：设置 Webhook
+- \`/deleteWebhook\`：删除 Webhook
+- \`/info\`：获取 Webhook 信息
+- \`/debug\`：查看 Worker 状态`;
+			await sendMessage(message.chat.id, helpText, env, 'Markdown');
+		}
+
+		return new Response(JSON.stringify({ status: 'success' }));
+	} catch (error: any) {
+		console.error('🚨 Error processing webhook:', error.message);
+		return new Response(JSON.stringify({ status: 'error', message: 'Internal error processing webhook.' }));
+	}
 }
 
-// 设置 Webhook
+/**
+ * Sets the webhook for the Telegram bot to point to this worker.
+ * @param request The incoming request.
+ * @param env The environment variables.
+ * @returns A Response indicating success or failure.
+ */
 async function setWebhook(request: Request, env: Env): Promise<Response> {
-  const { webhookUrl } = getWebhookUrl(env);
-  if (!env.WORKER_URL) {
-    return new Response(JSON.stringify({
-      status: "error",
-      message: "未设置 WORKER_URL 环境变量"
-    }), {
-      status: 400,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': 'application/json'
-      }
-    });
-  }
-  console.log("🔄 正在设置 Telegram Webhook...");
-  const res = await fetch(webhookUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      url: `${env.WORKER_URL}/webhook`,
-      secret_token: env.SECRET_TOKEN || ''
-    })
-  });
-  const data = await res.json();
-  if (!res.ok || !data.ok) {
-    return new Response(JSON.stringify({
-      status: "error",
-      message: "设置 Webhook 失败",
-      error: data
-    }), {
-      status: 500,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': 'application/json'
-      }
-    });
-  }
-  console.log("✅ Webhook 设置成功:", data);
-  return new Response(JSON.stringify({
-    status: "success",
-    message: "Webhook 设置成功",
-    result: data.result
-  }), {
-    headers: {
-      'Access-Control-Allow-Origin': '*',
-      'Content-Type': 'application/json'
-    }
-  });
+	const worker_host = env.WORKER_URL || new URL(request.url).host;
+	const webhookUrl = `https://${worker_host}/webhook`;
+
+	console.log(`🔄 Setting Telegram webhook to: ${webhookUrl}`);
+	try {
+		await telegramApi<boolean>('setWebhook', env.BOT_TOKEN, {
+			url: webhookUrl,
+			secret_token: env.SECRET_TOKEN || '',
+		});
+		const message = `✅ Webhook set successfully to: ${webhookUrl}`;
+		console.log(message);
+		return new Response(JSON.stringify({ status: 'success', message }));
+	} catch (error: any) {
+		console.error(`🚫 Failed to set webhook: ${error.message}`);
+		return new Response(JSON.stringify({ status: 'error', message: error.message }), {
+			status: 500,
+			headers: { 'Content-Type': 'application/json' },
+		});
+	}
 }
 
-// 删除 Webhook
+/**
+ * Deletes the webhook for the Telegram bot.
+ * @param request The incoming request.
+ * @param env The environment variables.
+ * @returns A Response indicating success or failure.
+ */
 async function deleteWebhook(request: Request, env: Env): Promise<Response> {
-  const { webhookUrl } = getWebhookUrl(env);
-  console.log("🔄 正在删除 Telegram Webhook...");
-  const res = await fetch(webhookUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ url: '' })
-  });
-  const data = await res.json();
-  if (!res.ok || !data.ok) {
-    return new Response(JSON.stringify({
-      status: "error",
-      message: "删除 Webhook 失败",
-      error: data
-    }), {
-      status: 500,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': 'application/json'
-      }
-    });
-  }
-  console.log("✅ Webhook 删除成功");
-  return new Response(JSON.stringify({
-    status: "success",
-    message: "Webhook 已删除"
-  }), {
-    headers: {
-      'Access-Control-Allow-Origin': '*',
-      'Content-Type': 'application/json'
-    }
-  });
+	console.log('🔄 Deleting Telegram webhook...');
+	try {
+		await telegramApi<boolean>('setWebhook', env.BOT_TOKEN, { url: '' });
+		console.log('✅ Webhook deleted successfully.');
+		return new Response(JSON.stringify({ status: 'success', message: 'Webhook deleted successfully.' }));
+	} catch (error: any) {
+		console.error(`🚫 Failed to delete webhook: ${error.message}`);
+		return new Response(JSON.stringify({ status: 'error', message: error.message }), {
+			status: 500,
+			headers: { 'Content-Type': 'application/json' },
+		});
+	}
 }
 
-// 获取 Bot 信息
-async function getBotInfo(request: Request, env: Env): Promise<Response> {
-  const { secretUrl } = getWebhookUrl(env);
-  console.log("🔍 正在查询 Bot 信息...");
-  const res = await fetch(secretUrl);
-  if (!res.ok) {
-    console.error("🚫 无法获取 Bot 信息");
-    return new Response(JSON.stringify({
-      status: "error",
-      message: "获取 Bot 信息失败"
-    }), {
-      status: 500,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': 'application/json'
-      }
-    });
-  }
-  const data = await res.json();
-  return new Response(JSON.stringify({
-    status: "success",
-    bot_info: data
-  }), {
-    headers: {
-      'Access-Control-Allow-Origin': '*',
-      'Content-Type': 'application/json'
-    }
-  });
+/**
+ * Gets information about the current webhook.
+ * @param request The incoming request.
+ * @param env The environment variables.
+ * @returns A Response with the webhook information.
+ */
+async function getWebhookInfo(request: Request, env: Env): Promise<Response> {
+	console.log('🔍 Querying webhook info...');
+	try {
+		const info = await telegramApi<WebhookInfo>('getWebhookInfo', env.BOT_TOKEN);
+		console.log('ℹ️ Webhook info:', info);
+		return new Response(JSON.stringify({ status: 'success', webhook_info: info }));
+	} catch (error: any) {
+		console.error(`🚫 Failed to get webhook info: ${error.message}`);
+		return new Response(JSON.stringify({ status: 'error', message: error.message }), {
+			status: 500,
+			headers: { 'Content-Type': 'application/json' },
+		});
+	}
 }
 
-// 安全地发送消息到 Telegram
-async function sendMessage(chatId: string, text: string, env: Env, parseMode: string = 'Markdown') {
-  console.log("📲 正在发送消息至 Telegram:", chatId);
-  const messageRes = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text: text,
-      parse_mode: parseMode
-    })
-  });
-  if (!messageRes.ok) {
-    const errData = await messageRes.text();
-    console.error('🚫 无法发送消息至 Telegram', errData);
-    throw new Error('无法发送消息');
-  }
-  const messageData = await messageRes.json();
-  return messageData;
+/**
+ * Sends a message to a Telegram chat.
+ * @param chatId The ID of the chat to send the message to.
+ * @param text The text of the message.
+ * @param env The environment variables.
+ * @param parseMode The parse mode for the message (e.g., 'Markdown').
+ */
+async function sendMessage(chatId: string | number, text: string, env: Env, parseMode: string = 'Markdown') {
+	console.log(`📲 Sending message to chat: ${chatId}`);
+	try {
+		await telegramApi<Message>('sendMessage', env.BOT_TOKEN, {
+			chat_id: chatId,
+			text: text,
+			parse_mode: parseMode,
+		});
+		console.log('💬 Message sent successfully.');
+	} catch (error: any) {
+		console.error(`🚫 Failed to send message: ${error.message}`);
+	}
 }
 
-// 调试接口（返回环境信息）
-async function debugEnv(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-  return new Response(JSON.stringify({
-    status: "success",
-    message: "Telegram 文件代理 Worker 正在运行",
-    env: {
-      bot_token: env.BOT_TOKEN ? "已设置" : "未设置",
-      secret_token: env.SECRET_TOKEN ? "已设置" : "未设置",
-      worker_url: env.WORKER_URL || "未设置"
-    }
-  }), {
-    headers: {
-      'Access-Control-Allow-Origin': '*',
-      'Content-Type': 'application/json'
-    }
-  });
+/**
+ * A debug endpoint to check environment status and configuration.
+ * Redacts sensitive information.
+ * @param request The incoming request.
+ * @param env The environment variables.
+ * @returns A Response with debug information.
+ */
+async function debugEnv(request: Request, env: Env): Promise<Response> {
+	const worker_host = env.WORKER_URL || new URL(request.url).host;
+	return new Response(
+		JSON.stringify(
+			{
+				status: 'success',
+				message: 'Telegram File Proxy Worker is running.',
+				env: {
+					bot_token: env.BOT_TOKEN ? '[REDACTED]' : 'Not Set',
+					secret_token: env.SECRET_TOKEN ? '[REDACTED]' : 'Not Set',
+					worker_url: env.WORKER_URL || `Not Set (using request host: ${worker_host})`,
+				},
+			},
+			null,
+			2
+		),
+		{
+			headers: { 'Content-Type': 'application/json' },
+		}
+	);
 }
+
+// --- Main Fetch Handler ---
+
+type RouteHandler = (request: Request, env: Env, params: Record<string, string>) => Promise<Response>;
+
+const routes: [string, RegExp, RouteHandler][] = [
+	['POST', /^\/webhook\/?$/, handleWebhook],
+	['GET', /^\/file\/(?<file_id>[^/]+)\/?$/, handleFileProxy],
+	['GET', /^\/setWebhook\/?$/, setWebhook],
+	['GET', /^\/deleteWebhook\/?$/, deleteWebhook],
+	['GET', /^\/(info|getWebhookInfo)\/?$/, getWebhookInfo],
+	['GET', /^\/debug\/?$/, debugEnv],
+];
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
-    const method = request.method;
-    const corsHeaders = {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization'
-    };
-    // 预检请求（CORS）
-    if (method === 'OPTIONS') {
-      return new Response(null, { headers: corsHeaders });
-    }
-    // 处理不同路径请求
-    if (method === 'GET' && url.pathname.startsWith('/file/')) {
-      return await handleFileProxy(request, url, env);
-    } else if (method === 'POST' && url.pathname === '/webhook') {
-      return await handleWebhook(request, env);
-    } else if (method === 'GET' && url.pathname === '/setWebhook') {
-      return await setWebhook(request, env);
-    } else if (method === 'GET' && url.pathname === '/deleteWebhook') {
-      return await deleteWebhook(request, env);
-    } else if (method === 'GET' && url.pathname === '/info') {
-      return await getBotInfo(request, env);
-    } else if (method === 'GET' && url.pathname === '/debug') {
-      return await debugEnv(request, env, ctx);
-    }
-    // 通用响应（用于其他未识别路径）
-    return new Response(JSON.stringify({
-      status: "success",
-      message: "Telegram 文件代理 Worker 已正常启动"
-    }), {
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': 'application/json'
-      }
-    });
-  }
+	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+		const url = new URL(request.url);
+		const method = request.method;
+		const corsHeaders = {
+			'Access-Control-Allow-Origin': '*',
+			'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+			'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Telegram-Bot-API-Secret-Token',
+		};
+
+		if (method === 'OPTIONS') {
+			return new Response(null, { headers: corsHeaders });
+		}
+
+		const addCors = (response: Response) => {
+			Object.entries(corsHeaders).forEach(([key, value]) => response.headers.set(key, value));
+			return response;
+		};
+
+		let response: Response;
+		try {
+			for (const [routeMethod, pattern, handler] of routes) {
+				if (method === routeMethod) {
+					const match = url.pathname.match(pattern);
+					if (match) {
+						const params = match.groups || {};
+						response = await handler(request, env, params);
+						return addCors(response);
+					}
+				}
+			}
+
+			// Default response for unmatched routes
+			response = new Response(
+				JSON.stringify({
+					status: 'success',
+					message: 'Telegram File Proxy Worker is running. See /debug for status.',
+				}),
+				{ headers: { 'Content-Type': 'application/json' } }
+			);
+		} catch (e: any) {
+			console.error('🚨 Unhandled error in fetch:', e);
+			response = new Response(JSON.stringify({ status: 'error', message: 'An unexpected error occurred.' }), { status: 500 });
+		}
+
+		return addCors(response);
+	},
 };
