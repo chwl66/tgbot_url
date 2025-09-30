@@ -155,9 +155,8 @@ async function getFileInfo(fileId: string, env: Env): Promise<File> {
 async function checkWebhookAuth(request: Request, env: Env): Promise<boolean> {
 	const secretToken = env.SECRET_TOKEN || '';
 	if (!secretToken) {
-		// This is a critical security misconfiguration.
-		console.error('CRITICAL: SECRET_TOKEN is not set. Webhook authentication is disabled and all requests will be rejected.');
-		return false;
+		console.warn('🔒 No SECRET_TOKEN configured. Webhook requests are not being authenticated. This is NOT recommended for production.');
+		return true; // For ease of setup, allow if not set.
 	}
 
 	const token = request.headers.get('X-Telegram-Bot-API-Secret-Token');
@@ -166,7 +165,7 @@ async function checkWebhookAuth(request: Request, env: Env): Promise<boolean> {
 		return true;
 	}
 
-	console.error('🔒 Webhook request unauthorized, missing or wrong token');
+	console.error('🔒 Webhook request unauthorized, missing or wrong token. Ensure SECRET_TOKEN is set correctly on both Telegram and the worker.');
 	return false;
 }
 
@@ -183,7 +182,7 @@ async function checkWebhookAuth(request: Request, env: Env): Promise<boolean> {
  * @param params The route parameters, containing the file_id.
  * @returns A 302 Redirect Response or a JSON response with file info.
  */
-async function handleFileProxy(request: Request, env: Env, params: { file_id: string }): Promise<Response> {
+async function handleFileProxy(request: Request, env: Env, params: Record<string, string>): Promise<Response> {
 	const { file_id } = params;
 	if (!file_id) {
 		// This case should not be reached if the router is working correctly
@@ -226,8 +225,9 @@ async function handleFileProxy(request: Request, env: Env, params: { file_id: st
 			return Response.redirect(file_url, 302);
 		}
 	} catch (error: any) {
-		console.error(`🚫 Failed to proxy file: ${error.message}`);
-		return new Response(JSON.stringify({ status: 'error', message: error.message }), {
+		console.error(`🚫 Failed to proxy file:`, error);
+		const errorMessage = error instanceof Error ? error.message : String(error);
+		return new Response(JSON.stringify({ status: 'error', message: `Proxy failed: ${errorMessage}` }), {
 			status: 500,
 			headers: { 'Content-Type': 'application/json' },
 		});
@@ -239,9 +239,10 @@ async function handleFileProxy(request: Request, env: Env, params: { file_id: st
  * It processes messages containing files, photos, videos, etc., and replies with a public link.
  * @param request The incoming request from Telegram.
  * @param env The environment variables.
+ * @param params The route parameters (unused in this handler).
  * @returns A Response to acknowledge receipt to Telegram.
  */
-async function handleWebhook(request: Request, env: Env): Promise<Response> {
+async function handleWebhook(request: Request, env: Env, params: Record<string, string>): Promise<Response> {
 	console.log('📦 Webhook request received');
 
 	if (!(await checkWebhookAuth(request, env))) {
@@ -298,9 +299,10 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
  * Sets the webhook for the Telegram bot to point to this worker.
  * @param request The incoming request.
  * @param env The environment variables.
+ * @param params The route parameters (unused in this handler).
  * @returns A Response indicating success or failure.
  */
-async function setWebhook(request: Request, env: Env): Promise<Response> {
+async function setWebhook(request: Request, env: Env, params: Record<string, string>): Promise<Response> {
 	const worker_host = env.WORKER_URL || new URL(request.url).host;
 	const webhookUrl = `https://${worker_host}/webhook`;
 
@@ -326,9 +328,10 @@ async function setWebhook(request: Request, env: Env): Promise<Response> {
  * Deletes the webhook for the Telegram bot.
  * @param request The incoming request.
  * @param env The environment variables.
+ * @param params The route parameters (unused in this handler).
  * @returns A Response indicating success or failure.
  */
-async function deleteWebhook(request: Request, env: Env): Promise<Response> {
+async function deleteWebhook(request: Request, env: Env, params: Record<string, string>): Promise<Response> {
 	console.log('🔄 Deleting Telegram webhook...');
 	try {
 		await telegramApi<boolean>('setWebhook', env.BOT_TOKEN, { url: '' });
@@ -347,9 +350,10 @@ async function deleteWebhook(request: Request, env: Env): Promise<Response> {
  * Gets information about the current webhook.
  * @param request The incoming request.
  * @param env The environment variables.
+ * @param params The route parameters (unused in this handler).
  * @returns A Response with the webhook information.
  */
-async function getWebhookInfo(request: Request, env: Env): Promise<Response> {
+async function getWebhookInfo(request: Request, env: Env, params: Record<string, string>): Promise<Response> {
 	console.log('🔍 Querying webhook info...');
 	try {
 		const info = await telegramApi<WebhookInfo>('getWebhookInfo', env.BOT_TOKEN);
@@ -390,9 +394,10 @@ async function sendMessage(chatId: string | number, text: string, env: Env, pars
  * Redacts sensitive information.
  * @param request The incoming request.
  * @param env The environment variables.
+ * @param params The route parameters (unused in this handler).
  * @returns A Response with debug information.
  */
-async function debugEnv(request: Request, env: Env): Promise<Response> {
+async function debugEnv(request: Request, env: Env, params: Record<string, string>): Promise<Response> {
 	const worker_host = env.WORKER_URL || new URL(request.url).host;
 	return new Response(
 		JSON.stringify(
@@ -429,6 +434,15 @@ const routes: [string, RegExp, RouteHandler][] = [
 
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+		if (!env.BOT_TOKEN) {
+			const errorMsg = 'CRITICAL: BOT_TOKEN environment variable is not set.';
+			console.error(errorMsg);
+			return new Response(JSON.stringify({ status: 'error', message: `Configuration error: ${errorMsg}` }), {
+				status: 500,
+				headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+			});
+		}
+
 		const url = new URL(request.url);
 		const method = request.method;
 		const corsHeaders = {
@@ -469,7 +483,8 @@ export default {
 			);
 		} catch (e: any) {
 			console.error('🚨 Unhandled error in fetch:', e);
-			response = new Response(JSON.stringify({ status: 'error', message: 'An unexpected error occurred.' }), { status: 500 });
+			const errorMessage = e instanceof Error ? e.message : String(e);
+			response = new Response(JSON.stringify({ status: 'error', message: `Unhandled error: ${errorMessage}` }), { status: 500 });
 		}
 
 		return addCors(response);
