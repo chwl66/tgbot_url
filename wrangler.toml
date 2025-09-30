@@ -1,6 +1,0 @@
-name = "tgbot-url"
-compatibility_date = "2023-10-01"
-main = "src/index.ts"
-
-[env.production]
-# 生产环境变量通过 wrangler secret 设置
